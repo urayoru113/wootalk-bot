@@ -2,6 +2,7 @@
 import os
 import time
 import threading
+import logging
 from importlib import import_module
 
 from selenium import webdriver
@@ -12,6 +13,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from googletrans import Translator
 
+
 _Options = {
     'firefox': getattr(import_module('selenium.webdriver.firefox.options'), 'Options'),
     'chrome': getattr(import_module('selenium.webdriver.chrome.options'), 'Options'),
@@ -21,6 +23,15 @@ _webdriver = {
     'firefox': getattr(import_module('selenium.webdriver'), 'Firefox'),
     'chrome': getattr(import_module('selenium.webdriver'), 'Chrome'),
 }
+
+# driver_name in folder driver
+_driver_name = {
+    'firefox': 'geckodriver-v0.26.0-win64.exe',
+    'chrome': 'chromedriver83.0.4103.39.exe',
+}
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
 
 def synchronized_with_attr(lock_name):
 
@@ -55,11 +66,10 @@ class setInterval:
     def cancel(self) :
         self.event.set()
 
-
 class MessageHandler:
     script = """
 window.extractOtherText = function(msg) {
-        if (typeof(msg) == 'object') {
+        if (typeof msg == 'object') {
             msg = msg.textContent;
         }
         msg = msg.split('陌生人：');
@@ -72,7 +82,7 @@ window.extractOtherText = function(msg) {
 }
 
 window.extractMyText = function(msg) {
-        if (typeof(msg) == 'object') {
+        if (typeof msg == 'object') {
             msg = msg.textContent;
         }
         msg = msg.split('我：');
@@ -102,14 +112,14 @@ window._clearInput = () => {
 }
 
 window.send = (msg) => {
-    if (document.querySelector('#sendButton input').value != "回報" && !isLeave()) {
+    if (document.querySelector('#sendButton input').value != "回報" && isChat()) {
         messageInput.value = msg;
         sendMessage();
     }
 }
 
 window.sendMsg = () => {
-    if (document.querySelector('#sendButton input').value != "回報" && !isLeave()) {
+    if (document.querySelector('#sendButton input').value != "回報" && isChat()) {
         sendMessage();
     }
 }
@@ -117,8 +127,8 @@ window.sendMsg = () => {
 """
     _instance = None
     _no_init = False
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
+    def __new__(cls, *args, **kwargs): 
+        if not cls._instance: 
             cls._instance = super().__new__(cls)
         return cls._instance
 
@@ -135,18 +145,23 @@ window.sendMsg = () => {
         self.other_log_mid = -1
         self.other_msgs = []
         self.others_msgs = []
-
+        
+        self.other_id = -1
+        
         self.__actions = {
             'echo': self.echo,
             'tran': self.tran,
+            'emoji': self.emoji,
         }
         self.driver.execute_script(self.script)
         self.translator = Translator()
-
-        if not hasattr(self, 'action_interval'):
-            self.action_interval = None
-        if not hasattr(self, 'auto_record_interval'):
-            self.auto_record_interval = None
+        
+        if hasattr(self, 'action_interval') and not self.action_interval:
+            self.action_interval.cancel()
+        self.action_interval = None
+        if hasattr(self, 'auto_record_interval') and not self.auto_record_interval:
+            self.auto_record_interval.cancel()
+        self.auto_record_interval = None
 
     def update_msgs(self):
         otherTexts, other_mids = self.driver.execute_script("return getText();");
@@ -154,87 +169,153 @@ window.sendMsg = () => {
             if self.other_log_mid < other_mids[i]:
                 self.other_msgs.append(otherText)
                 self.other_log_mid = other_mids[i]
-
+        
         if self.curr_index < len(self.other_msgs):
             self.curr_msg = self.other_msgs[self.curr_index]
-
-    @synchronized_with_attr('lock')
-    def action(self, method, *args, **kwargs):
-        assert method in self.__actions, "Method '%s' does not exists" % method
-
-        # the method to handle message
-        if not self.driver.execute_script('return isLeave()'):
-            self.update_msgs()
-        if self.curr_index < len(self.other_msgs):
-            res_msg = self.__actions[method](*args, **kwargs)
-            self.send_message(res_msg)
-            self.curr_index += 1
-
+            
     def send_message(self, msg):
         # self.driver.execute_script(f'send("{msg}")')
         self.driver.execute_script('_clearInput()')
         #text_field = WebDriverWait(driver, 3).until(
         #            EC.presence_of_element_located((By.ID, 'messageInput')))
-        wait_time = .2/len(msg)
+        wait_time = .2/len(msg) if len(msg) > 0 else .2
         for word in msg:
             time.sleep(wait_time)
             word = word.replace('\\', '\\\\').replace('"', '\\"')
             self.driver.execute_script(f'messageInput.value += "{word}";')
-        self.driver.execute_script('sendMsg()')
-
-    def echo(self):
-        return self.curr_msg
-
-    def tran(self, dest='en'):
-        return self.translator.translate(self.curr_msg, dest=dest).text
+        if self.other_id == len(self.other_msgs):
+            self.driver.execute_script('sendMsg()')
 
     @synchronized_with_attr('lock')
     def record(self):
-        if len(self.other_msgs) != 0 and self.driver.execute_script('return isLeave()'):
+        if len(self.other_msgs) != 0 and not self.driver.execute_script('return isChat()'):
             self.others_msgs.append(self.other_msgs)
             self.curr_index = 0
             self.curr_msg = None
             self.other_log_mid = -1
             self.other_msgs = []
 
+    @synchronized_with_attr('lock')
+    def action(self, method, *args, **kwargs):
+        assert method in self.__actions, "Method '%s' does not exists" % method
+
+        # the method to handle message
+        if self.driver.execute_script('return isChat()'):
+            self.update_msgs()
+            if self.curr_index < len(self.other_msgs):
+                self.other_id = len(self.other_msgs)
+                res_msg = self.__actions[method](*args, **kwargs)
+                self.send_message(res_msg)
+                self.curr_index += 1
+
+    def echo(self):
+        return self.curr_msg
+    
+    def emoji(self):
+        return emojis[randint(0, len(emojis)-1)]
+
+    def tran(self, dest='en'):
+        return self.translator.translate(self.curr_msg, dest=dest).text
+
     def action_trigger(self, method, fargs=(), fkwargs={}, interval=0.2, *targs, **tkwargs):
+        assert type(fargs) == tuple, "type '%s' must be 'tuple', but got %s" % (fargs, type(fargs).__name__)
+        assert type(fkwargs) == dict, "type '%s' must be 'dict', but got %s" % (fkwargs, type(fkwargs).__name__)
+
         if not self.action_interval:
             self.action_interval = setInterval(interval, self.action, fargs=(method, *fargs), fkwargs=fkwargs, name=f'{method}')
-            print(f'start auto {method}')
+            logger.info(f'start auto {method}')
         else:
             self.action_interval.cancel()
             self.action_interval = None
-            print(f'stop auto {method}')
-
+            logger.info(f'stop auto {method}')
+            
     def record_trigger(self):
         if not self.auto_record_interval:
             self.auto_record_interval = setInterval(0.4, self.record, name='record')
-            print(f'start auto record')
+            logger.info(f'start auto record')
         else:
             self.auto_record_interval.cancel()
             self.auto_record_interval = None
-            print(f'stop auto record')
+            logger.info(f'stop auto record')
 
 
 class WooControler:
     script = """
-
-window.isLeave = () => {
+    
+window.isTitle = () => {
     let systemTexts = document.querySelectorAll('.system.text');
-    if (systemTexts.length <= 1) {
-        return true;
-    }
 
-    systemTexts = systemTexts[systemTexts.length-2].textContent.split("離開");
-    if (systemTexts.length >= 2 && systemTexts[1] == "了，請按") {
+    if (systemTexts.length == 1) {
+        let otherTexts = document.querySelectorAll('.stranger.text');
+        let myTexts = document.querySelectorAll('.my.text');
+        if (otherTexts.length == 0 &&
+            myTexts.length == 0) {
+            return true;
+            }
+    } else {
+        return false;
+    }
+}
+
+window.isWait = () => {
+    let systemTexts = document.querySelectorAll('.system.text');
+    if (systemTexts.length == 3 &&
+        systemTexts[0].textContent == "系統訊息：粉絲專頁 | 尋人啟事 | App下載") {
         return true;
     } else {
         return false;
     }
 }
 
+window.isChat = () => {
+    let systemTexts = document.querySelectorAll('.system.text');
+    if (systemTexts.length >= 2) {
+        let systemTextSp = systemTexts[systemTexts.length-2].textContent.split("離開");
+        if (systemTextSp[1] == "了，請按") {
+            return false;
+        }
+    }
+    if (systemTexts.length >= 3 &&
+        (systemTexts[0].textContent == "系統訊息：加密連線完成，開始聊天囉！" ||
+         systemTexts[2].textContent == "系統訊息：加密連線完成，開始聊天囉！")) {
+        return true;
+    }
+    
+    if (systemTexts.length >= 1) {
+        let otherTexts = document.querySelectorAll('.stranger.text');
+        let myTexts = document.querySelectorAll('.my.text');
+        if (otherTexts.length > 0 || myTexts.length > 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+window.isLeave = () => {
+    let systemTexts = document.querySelectorAll('.system.text');
+
+    if (systemTexts.length >= 2) {
+        let systemTextSp = systemTexts[systemTexts.length - 2].textContent.split("離開")
+        if (systemTextSp[1] == "了，請按") {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+leaveChat = () => {
+    document.querySelector('#changeButton > input').click();
+    let ensureText = document.querySelector('#ensureText');
+    if (ensureText != null) {
+        ensureText.value = 'leave';
+    }
+    document.querySelector('#popup-yes').click();
+}
+
 window.sendFirstMsg = (msg) => {
-    if (typeof(this.sendFirstMsgInterval) == "undefined" &&
+    if (typeof this.sendFirstMsgInterval == "undefined" &&
         document.querySelectorAll('.me.text').length == 0) {
         let self = this;
         this.sendFirstMsgInterval = setInterval(() => {
@@ -244,38 +325,38 @@ window.sendFirstMsg = (msg) => {
                     stopFlag = true;
                 }
             }
-            if (stopFlag || isLeave()) {
+            if (stopFlag || isTitle() || isLeave() || typeof this.autoStartInterval == "undefined") {
                 clearInterval(self.sendFirstMsgInterval);
                 self.sendFirstMsgInterval = undefined;
             } else {
                 document.getElementById('messageInput').value = msg;
                 sendMsg();
             }
-        }, 4000);
+        }, 1000);
     }
 }
 
 window.autoRestart = (msg) => {
-    if (typeof(this.autoStartInterval) == "undefined") {
+    if (typeof this.autoStartInterval == "undefined") {
         let self = this;
         this.autoStartInterval = setInterval(() => {
             let systemTexts = document.querySelectorAll('.system.text');
-            if (systemTexts[0].textContent == "系統訊息：WooTalk系統出了一些狀況，我們正在緊急維護中😅請稍後即可繼續聊天至粉絲專頁獲取更多相關資訊") {
+            if (systemTexts[0].textContent == "系統訊息：WooTalk系統出了一些狀況，我們正在緊急維護中U+0001F605請稍後即可繼續聊天至粉絲專頁獲取更多相關資訊") {
                 setTimeout(() => {
-                    leave();
+                    leaveChat();
                 }, 30000);
-            } else if (systemTexts.length <= 1) {
+            } else if (isTitle()) {
                 clickStartChat();
-                if (typeof(msg) != "undefined") {
-                    sendFirstMsg(msg)
+            } else if(isWait() || isChat()) {
+                if (typeof msg != "undefined") {
+                    sendFirstMsg(msg);
                 }
             } else {
-                let checkleave = systemTexts[systemTexts.length-2].textContent.split("離開");
-                if (checkleave.length >= 2 && checkleave[1] == "了，請按") {
-                    leave();
-                }
+                clearInterval(this.sendFirstMsgInterval);
+                this.sendFirstMsgInterval = undefined;
+                leaveChat();
             }
-        }, 2000);
+        }, 3000);
         return "startAutoRestart";
     }
     if (this.autoStartInterval) {
@@ -289,6 +370,7 @@ window.autoRestart = (msg) => {
 window.block = () => {
     let blacklist = [
         "男",
+        "色色",
         "男生",
         "女嗎?",
         "女?",
@@ -301,7 +383,7 @@ window.block = () => {
     ];
 
     let self = this;
-    if (typeof(this.blockInterval) == "undefined") {
+    if (typeof this.blockInterval == "undefined") {
         this.blockInterval = setInterval(() => {
             let otherMsgsLen = document.querySelectorAll('.stranger.text').length
             if (otherMsgsLen > 0 && otherMsgsLen < 6) {
@@ -309,16 +391,16 @@ window.block = () => {
                 msg = extractOtherText(otherTexts[otherTexts.length - 1])
                 for (let i in blacklist) {
                     if (msg == blacklist[i]) {
-                        leave();
+                        leaveChat();
                     }
                 }
                 for (let j in msg) {
                     if (msg[j] == "男") {
-                        leave();
+                        leaveChat();
                     }
                 }
                 if (msg.length > 50) {
-                    leave();
+                    leaveChat();
                 }
             }
         }, 1000);
@@ -335,8 +417,8 @@ window.block = () => {
     _instance = None
     _no_init = False
     def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
+        if not cls._instance: 
+            cls._instance = super().__new__(cls) 
         return cls._instance
 
     def __init__(self, driver, force_init=False):
@@ -368,27 +450,22 @@ window.block = () => {
     def restart_trigger(self, msg=None):
         msg = msg.replace('\\', '\\\\"').replace('"', '\\"')
         res = self.driver.execute_script(f'return autoRestart("{msg}")')
-        print(res)
-
+        logger.info(res)
+            
     def block_trigger(self):
         res = self.driver.execute_script('return block()')
-        print(res)
-
-    def leave(self):
-        self.driver.execute_script('leave()')
-
-    def is_leave(self):
-        return self.driver.execute_script('return isLeave()')
+        logger.info(res)
 
 
 if __name__ == '__main__':
     woo_url = "https://wootalk.today"
-    driver_name = 'geckodriver-v0.26.0-win64.exe'
     path = os.path.join('driver', driver_name)
     browser = 'firefox'
+    driver_name = _driver_name[browser]
     options = _Options[browser]()
     driver = _webdriver[browser](executable_path=path,
                                options=options)
+    
     driver.get(woo_url)
 
     msgHl = MessageHandler(driver)
