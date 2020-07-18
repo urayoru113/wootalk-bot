@@ -183,7 +183,7 @@ window.sendMsg = () => {
             time.sleep(wait_time)
             word = word.replace('\\', '\\\\').replace('"', '\\"')
             self.driver.execute_script(f'messageInput.value += "{word}";')
-        if self.other_id == len(self.other_msgs):
+        if self.other_id == len(self.others_msgs):
             self.driver.execute_script('sendMsg()')
 
     @synchronized_with_attr('lock')
@@ -203,7 +203,7 @@ window.sendMsg = () => {
         if self.driver.execute_script('return isChat()'):
             self.update_msgs()
             if self.curr_index < len(self.other_msgs):
-                self.other_id = len(self.other_msgs)
+                self.other_id = len(self.others_msgs)
                 res_msg = self.__actions[method](*args, **kwargs)
                 self.send_message(res_msg)
                 self.curr_index += 1
@@ -459,9 +459,9 @@ window.block = () => {
 
 if __name__ == '__main__':
     woo_url = "https://wootalk.today"
-    path = os.path.join('driver', driver_name)
     browser = 'firefox'
     driver_name = _driver_name[browser]
+    path = os.path.join('driver', driver_name)
     options = _Options[browser]()
     driver = _webdriver[browser](executable_path=path,
                                options=options)
